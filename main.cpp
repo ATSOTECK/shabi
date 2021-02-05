@@ -5,6 +5,7 @@
 #include <cstdarg>
 #include <cstring>
 #include <ctime>
+#include <fcntl.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -12,8 +13,10 @@
 #define SHIBA_VER "0.0.1"
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define TAB_SIZE 4
+#define QUIT_TIMES 2
 
 enum ekeys {
+    vk_backspace = 127,
     vk_left = 1000,
     vk_right,
     vk_up,
@@ -40,9 +43,11 @@ struct EditorInfo {
     int w;
     int h;
     int linecount;
+    int dirty;
     char *filename;
     char statusmsg[80];
     time_t statusmsgTime;
+    bool statuserror;
     eline *line;
     termios origTermios{};
 };
@@ -126,6 +131,52 @@ void eAppendLine(char *line, size_t len) {
     eUpdateLine(&editorInfo.line[idx]);
 
     ++editorInfo.linecount;
+    ++editorInfo.dirty;
+}
+
+void eLineInsertChar(eline *line, int idx, int c) {
+    if (idx < 0 || idx > line->size) {
+        idx = line->size;
+    }
+
+    line->data = (char*)realloc(line->data, line->size + 2);
+    memmove(&line->data[idx + 1], &line->data[idx], line->size - idx + 1);
+    ++line->size;
+    line->data[idx] = (char)c;
+    eUpdateLine(line);
+    ++editorInfo.dirty;
+}
+
+void eLineDeleteChar(eline *line, int idx) {
+    if (idx < 0 || idx >= line->size) {
+        return;
+    }
+
+    memmove(&line->data[idx], &line->data[idx + 1], line->size - idx);
+    --line->size;
+    eUpdateLine(line);
+    ++editorInfo.dirty;
+}
+
+void eInsertChar(int c) {
+    if (editorInfo.cy == editorInfo.linecount) {
+        eAppendLine(NULL, 0);
+    }
+
+    eLineInsertChar(&editorInfo.line[editorInfo.cy], editorInfo.cx, c);
+    ++editorInfo.cx;
+}
+
+void eDeleteChar() {
+    if (editorInfo.cy == editorInfo.linecount) {
+        return;
+    }
+
+    eline *line = &editorInfo.line[editorInfo.cy];
+    if (editorInfo.cx > 0) {
+        eLineDeleteChar(line, editorInfo.cx - 1);
+        --editorInfo.cx;
+    }
 }
 
 void cls() {
@@ -168,6 +219,23 @@ void enableRawMode() {
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) {
         die("tcsetattr");
     }
+}
+
+void eSetStatus(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(editorInfo.statusmsg, sizeof(editorInfo.statusmsg), fmt, args);
+    va_end(args);
+    editorInfo.statusmsgTime = time(NULL);
+}
+
+void eSetError(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(editorInfo.statusmsg, sizeof(editorInfo.statusmsg), fmt, args);
+    va_end(args);
+    editorInfo.statusmsgTime = time(NULL);
+    editorInfo.statuserror = true;
 }
 
 void eMove(int k) {
@@ -324,6 +392,26 @@ int windowSize(int *w, int *h) {
     return 0;
 }
 
+char *eLinesToStr(int *buflen) {
+    int totlen = 0;
+    for (int i = 0; i < editorInfo.linecount; ++i) {
+        totlen += editorInfo.line[i].size + 1;
+    }
+    *buflen = totlen;
+
+    char *buf = (char*)malloc(totlen);
+    char *p = buf;
+
+    for (int i = 0; i < editorInfo.linecount; ++i) {
+        memcpy(p, editorInfo.line[i].data, editorInfo.line[i].size);
+        p += editorInfo.line[i].size;
+        *p = '\n';
+        ++p;
+    }
+
+    return buf;
+}
+
 void eOpen(char *filename) {
     free(editorInfo.filename);
     editorInfo.filename = filename;
@@ -346,6 +434,35 @@ void eOpen(char *filename) {
 
     free(line);
     fclose(file);
+
+    editorInfo.dirty = 0;
+}
+
+void eSave() {
+    if (editorInfo.filename == NULL) {
+        return;
+    }
+
+    int len;
+    char *buf = eLinesToStr(&len);
+
+    int fd = open(editorInfo.filename, O_RDWR | O_CREAT, 0644);
+    if (fd != -1) {
+        if (ftruncate(fd, len) != -1) {
+            if (write(fd, buf, len) == len) {
+                close(fd);
+                free(buf);
+                eSetStatus("%d bytes written to disk", len);
+                editorInfo.dirty = 0;
+
+                return;
+            }
+        }
+        close(fd);
+    }
+
+    free(buf);
+    eSetStatus("Can't save! I/O error: %s", strerror(errno));
 }
 
 void eScroll() {
@@ -420,8 +537,8 @@ void eDrawStatusBar(abuf *ab) {
     abAppend(ab, "\x1b[38;5;245m", 11); //set foreground color x1b[38;5;[]m replace [] with the color
 
     char status[80], rstatus[80];
-    int len = snprintf(status, sizeof(status), "%.20s - %d lines",
-                       editorInfo.filename ? editorInfo.filename : "empty", editorInfo.linecount);
+    int len = snprintf(status, sizeof(status), "%.20s%s",
+                       editorInfo.filename ? editorInfo.filename : "empty", editorInfo.dirty ? "[+]" : "");
     int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d", editorInfo.cy + 1, editorInfo.linecount);
 
     if (len > editorInfo.w) {
@@ -452,7 +569,15 @@ void eDrawMsgBar(abuf *ab) {
     }
 
     if (msglen && time(NULL) - editorInfo.statusmsgTime < 5) {
+        if (editorInfo.statuserror) {
+            abAppend(ab, "\x1b[48;5;131m", 11); //set background color x1b[48;5;[]m replace [] with the color
+            abAppend(ab, "\x1b[38;5;232m", 11); //set foreground color x1b[38;5;[]m replace [] with the color
+        }
+
         abAppend(ab, editorInfo.statusmsg, msglen);
+        abAppend(ab, "\x1b[m", 3);
+    } else {
+        editorInfo.statuserror = false;
     }
 }
 
@@ -477,25 +602,40 @@ void ecls() {
     abFree(&ab);
 }
 
-void eSetStatus(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(editorInfo.statusmsg, sizeof(editorInfo.statusmsg), fmt, args);
-    va_end(args);
-    editorInfo.statusmsgTime = time(NULL);
-}
+void eTick() {
+    static int quitTimes = QUIT_TIMES;
 
-void eKeypress() {
     int k = eReadKey();
 
     switch (k) {
-        case CTRL_KEY('q'): quit();
+        case '\r': break;
+
+        case CTRL_KEY('q'):{
+            if (editorInfo.dirty && quitTimes > 0) {
+                eSetError("No write since last change (%d more times to override)", quitTimes--);
+                return;
+            } else {
+                quit();
+            }
+        } break;
+        case CTRL_KEY('B'): quit(); break;
+        case CTRL_KEY('s'): eSave(); break;
 
         case vk_home: editorInfo.cx = 0; break;
         case vk_end: {
             if (editorInfo.cy < editorInfo.linecount) {
                 editorInfo.cx = editorInfo.line[editorInfo.cy].size;
             }
+        } break;
+
+        case vk_backspace:
+        case CTRL_KEY('h'):
+        case vk_delete: {
+            if (k == vk_delete) {
+                eMove(vk_right);
+            }
+
+            eDeleteChar();
         } break;
 
         case vk_pagedown:
@@ -519,8 +659,10 @@ void eKeypress() {
         case vk_left:
         case vk_down:
         case vk_right: eMove(k); break;
-        default: break;
+        default: eInsertChar(k); break;
     }
+
+    quitTimes = QUIT_TIMES;
 }
 
 void eInit() {
@@ -531,9 +673,11 @@ void eInit() {
     editorInfo.xoffset = 0;
     editorInfo.linecount = 0;
     editorInfo.line = NULL;
+    editorInfo.dirty = 0;
     editorInfo.filename = NULL;
     editorInfo.statusmsg[0] = '\0';
     editorInfo.statusmsgTime = 0;
+    editorInfo.statuserror = false;
 
     if (windowSize(&editorInfo.w, &editorInfo.h) == -1) {
         die("windowSize");
@@ -550,11 +694,11 @@ int main(int argc, char **argv) {
         eOpen(argv[1]);
     }
 
-    eSetStatus("HELP: Ctrl-Q = quit");
+    eSetStatus("HELP: Ctrl-S = save | Ctrl-Q = quit");
 
     while (true) {
         ecls();
-        eKeypress();
+        eTick();
     }
 
     return 0;
