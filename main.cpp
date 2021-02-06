@@ -16,6 +16,8 @@
 #define QUIT_TIMES 2
 
 enum ekeys {
+    vk_escape = '\x1b',
+    vk_enter = '\r',
     vk_backspace = 127,
     vk_left = 1000,
     vk_right,
@@ -60,6 +62,10 @@ struct abuf {
 #define ABUF_INIT {NULL, 0}
 
 EditorInfo editorInfo{};
+
+void ecls();
+int eReadKey();
+char *ePrompt(const char *prompt);
 
 void abAppend(abuf *ab, const char *s, int len) {
     char *n = (char*)realloc(ab->b, ab->len + len);
@@ -117,10 +123,14 @@ void eUpdateLine(eline *line) {
     line->rsize = idx;
 }
 
-void eAppendLine(char *line, size_t len) {
-    editorInfo.line = (eline*)realloc(editorInfo.line, sizeof(eline) * (editorInfo.linecount + 1));
+void eInsertLine(int idx, char *line, size_t len) {
+    if (idx < 0 || idx > editorInfo.linecount) {
+        return;
+    }
 
-    int idx = editorInfo.linecount;
+    editorInfo.line = (eline*)realloc(editorInfo.line, sizeof(eline) * (editorInfo.linecount + 1));
+    memmove(&editorInfo.line[idx + 1], &editorInfo.line[idx], sizeof(eline) * (editorInfo.linecount - idx));
+
     editorInfo.line[idx].size = len;
     editorInfo.line[idx].data = (char*)malloc(len + 1);
     memcpy(editorInfo.line[idx].data, line, len);
@@ -131,6 +141,38 @@ void eAppendLine(char *line, size_t len) {
     eUpdateLine(&editorInfo.line[idx]);
 
     ++editorInfo.linecount;
+    ++editorInfo.dirty;
+}
+
+void eInsertNewLine() {
+    if (editorInfo.cx == 0) {
+        eInsertLine(editorInfo.cy, NULL, 0);
+    } else {
+        eline *line = &editorInfo.line[editorInfo.cy];
+        eInsertLine(editorInfo.cy + 1, &line->data[editorInfo.cx], line->size - editorInfo.cx);
+        line = &editorInfo.line[editorInfo.cy];
+        line->size = editorInfo.cx;
+        line->data[line->size] = '\0';
+        eUpdateLine(line);
+    }
+
+    ++editorInfo.cy;
+    editorInfo.cx = 0;
+}
+
+void eFreeLine(eline *line) {
+    free(line->rdata);
+    free(line->data);
+}
+
+void eDeleteLine(int idx) {
+    if (idx < 0 || idx >= editorInfo.linecount) {
+        return;
+    }
+
+    eFreeLine(&editorInfo.line[idx]);
+    memmove(&editorInfo.line[idx], &editorInfo.line[idx + 1], sizeof(eline) * (editorInfo.linecount - idx - 1));
+    --editorInfo.linecount;
     ++editorInfo.dirty;
 }
 
@@ -158,9 +200,18 @@ void eLineDeleteChar(eline *line, int idx) {
     ++editorInfo.dirty;
 }
 
+void eLineAppendString(eline *line, char *s, size_t len) {
+    line->data = (char*)realloc(line->data, line->size + len + 1);
+    memcpy(&line->data[line->size], s, len);
+    line->size += len;
+    line->data[line->size] = '\0';
+    eUpdateLine(line);
+    ++editorInfo.dirty;
+}
+
 void eInsertChar(int c) {
     if (editorInfo.cy == editorInfo.linecount) {
-        eAppendLine(NULL, 0);
+        eInsertLine(editorInfo.linecount, NULL, 0);
     }
 
     eLineInsertChar(&editorInfo.line[editorInfo.cy], editorInfo.cx, c);
@@ -168,7 +219,7 @@ void eInsertChar(int c) {
 }
 
 void eDeleteChar() {
-    if (editorInfo.cy == editorInfo.linecount) {
+    if (editorInfo.cy == editorInfo.linecount || (editorInfo.cx == 0 && editorInfo.cy == 0)) {
         return;
     }
 
@@ -176,12 +227,19 @@ void eDeleteChar() {
     if (editorInfo.cx > 0) {
         eLineDeleteChar(line, editorInfo.cx - 1);
         --editorInfo.cx;
+    } else {
+        editorInfo.cx = editorInfo.line[editorInfo.cy - 1].size;
+        eLineAppendString(&editorInfo.line[editorInfo.cy - 1], line->data, line->size);
+        eDeleteLine(editorInfo.cy);
+        --editorInfo.cy;
     }
 }
 
 void cls() {
     write(STDOUT_FILENO, "\x1b[2J", 4); //cls
     write(STDOUT_FILENO, "\x1b[H", 3); //move cursor
+    write(STDOUT_FILENO, "\x1b[m", 3);
+    write(STDOUT_FILENO, "\x1b]1337;CursorShape=0\x07", 21); //set cursor to a block, iTerm2 specific
 }
 
 void die(const char *s) {
@@ -222,6 +280,10 @@ void enableRawMode() {
 }
 
 void eSetStatus(const char *fmt, ...) {
+    if (fmt == NULL) {
+        return;
+    }
+
     va_list args;
     va_start(args, fmt);
     vsnprintf(editorInfo.statusmsg, sizeof(editorInfo.statusmsg), fmt, args);
@@ -230,12 +292,58 @@ void eSetStatus(const char *fmt, ...) {
 }
 
 void eSetError(const char *fmt, ...) {
+    if (fmt == NULL) {
+        return;
+    }
+
     va_list args;
     va_start(args, fmt);
     vsnprintf(editorInfo.statusmsg, sizeof(editorInfo.statusmsg), fmt, args);
     va_end(args);
     editorInfo.statusmsgTime = time(NULL);
     editorInfo.statuserror = true;
+}
+
+char *ePrompt(const char *prompt) {
+    if (prompt == NULL) {
+        return NULL;
+    }
+
+    size_t bufsize = 128;
+    char *buf = (char*)malloc(bufsize);
+
+    size_t buflen = 0;
+    buf[0] = '\0';
+
+    while (true) {
+        eSetStatus(prompt, buf);
+        ecls();
+
+        int k = eReadKey();
+        if (k == vk_delete || k == CTRL_KEY('h') || k == vk_backspace) {
+            if (buflen != 0) {
+                buf[--buflen] = '\0';
+            }
+        } else if (k == vk_escape) {
+            eSetStatus(NULL);
+            free(buf);
+
+            return NULL;
+        } else if (k == vk_enter) {
+            if (buflen != 0) {
+                eSetStatus(NULL);
+                return buf;
+            }
+        } else if (!iscntrl(k) && k < 128) {
+            if (buflen == bufsize - 1) {
+                bufsize *= 2;
+                buf = (char*)realloc(buf, bufsize);
+            }
+
+            buf[buflen++] = (char)k;
+            buf[buflen] = '\0';
+        }
+    }
 }
 
 void eMove(int k) {
@@ -429,7 +537,7 @@ void eOpen(char *filename) {
             --linelen;
         }
 
-        eAppendLine(line, linelen);
+        eInsertLine(editorInfo.linecount, line, linelen);
     }
 
     free(line);
@@ -440,7 +548,12 @@ void eOpen(char *filename) {
 
 void eSave() {
     if (editorInfo.filename == NULL) {
-        return;
+        editorInfo.filename = ePrompt("Write as: %s");
+
+        if (editorInfo.filename == NULL) {
+            eSetStatus("Write aborted");
+            return;
+        }
     }
 
     int len;
@@ -539,7 +652,7 @@ void eDrawStatusBar(abuf *ab) {
     char status[80], rstatus[80];
     int len = snprintf(status, sizeof(status), "%.20s%s",
                        editorInfo.filename ? editorInfo.filename : "empty", editorInfo.dirty ? "[+]" : "");
-    int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d", editorInfo.cy + 1, editorInfo.linecount);
+    int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d:%d", editorInfo.cy + 1, editorInfo.linecount, editorInfo.cx);
 
     if (len > editorInfo.w) {
         len = editorInfo.w;
@@ -597,6 +710,7 @@ void ecls() {
     snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (editorInfo.cy - editorInfo.yoffset) + 1, (editorInfo.rx - editorInfo.xoffset) + 1);
     abAppend(&ab, buf, strlen(buf));
     abAppend(&ab, "\x1b[?25h", 6);
+    abAppend(&ab, "\x1b]1337;CursorShape=1\x07", 21); //set cursor to vertical bar, iTerm2 specific
 
     write(STDOUT_FILENO, ab.b, ab.len);
     abFree(&ab);
@@ -608,7 +722,7 @@ void eTick() {
     int k = eReadKey();
 
     switch (k) {
-        case '\r': break;
+        case vk_enter: eInsertNewLine(); break;
 
         case CTRL_KEY('q'):{
             if (editorInfo.dirty && quitTimes > 0) {
