@@ -1,19 +1,26 @@
-#include <cerrno>
-#include <cctype>
-#include <cstdio>
-#include <cstdlib>
-#include <cstdarg>
-#include <cstring>
-#include <ctime>
+#include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SHIBA_VER "0.0.1"
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define TAB_SIZE 4
 #define QUIT_TIMES 2
+
+#define EDT true
+#define CMD false
+
+char welcomeMsg[] = "Welcome 傻屄 :)";
+
+typedef enum {false, true} bool;
 
 enum ekeys {
     vk_escape = '\x1b',
@@ -30,14 +37,29 @@ enum ekeys {
     vk_pagedown
 };
 
-struct eline {
+enum eHighlight {
+    HLNormal,
+    HLNumber,
+    HLMatch
+};
+
+#define HL_HIGHLIGHT_NUMBERS (1 << 0)
+
+typedef struct editorSyntax {
+    char *filetype;
+    char **filematch;
+    int flags;
+} editorSyntax;
+
+typedef struct eline {
     int size;
     int rsize;
     char *data;
     char *rdata;
-};
+    unsigned char *hl;
+} eline;
 
-struct EditorInfo {
+struct editorInfo {
     int cx, cy;
     int rx;
     int yoffset;
@@ -51,21 +73,29 @@ struct EditorInfo {
     time_t statusmsgTime;
     bool statuserror;
     eline *line;
-    termios origTermios{};
+    struct termios origTermios;
+    editorSyntax *syntax;
+    bool mode;
 };
 
-struct abuf {
+typedef struct abuf {
     char *b;
     int len;
-};
+} abuf;
 
 #define ABUF_INIT {NULL, 0}
 
-EditorInfo editorInfo{};
+struct editorInfo editorInfo;
+
+char *cHLExtensions[] = {".c", ".h", NULL};
+
+editorSyntax HLDB[] = {
+        {"c", cHLExtensions, HL_HIGHLIGHT_NUMBERS},
+};
 
 void ecls();
 int eReadKey();
-char *ePrompt(const char *prompt);
+char *ePrompt(const char *prompt, void (*callback)(char *, int));
 
 void abAppend(abuf *ab, const char *s, int len) {
     char *n = (char*)realloc(ab->b, ab->len + len);
@@ -96,6 +126,58 @@ int eCxToRx(eline *line, int cx) {
     return rx;
 }
 
+int eRxToCx(eline *line, int rx) {
+    int currentRx = 0;
+    int cx;
+    for ( cx = 0; cx < line->size; ++cx) {
+        if (line->data[cx] == '\t') {
+            currentRx += (TAB_SIZE - 1) - (currentRx % TAB_SIZE);
+        }
+
+        ++currentRx;
+        if (currentRx > rx) {
+            return cx;
+        }
+    }
+
+    return cx;
+}
+
+bool isSeperator(int c) {
+    return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[];", c) != NULL;
+}
+
+void eUpdateSyntax(eline *line) {
+    line->hl = (unsigned char*)realloc(line->hl, line->rsize);
+    memset(line->hl, HLNormal, line->rsize);
+
+    int prevStep = 1;
+
+    int i = 0;
+    while (i < line->rsize) {
+        char c = line->rdata[i];
+        unsigned char prevHL = (i > 0) ? line->hl[i - 1] : HLNormal;
+
+        if (isdigit(c) && (prevStep || prevHL == HLNumber) || (c == '.' && prevHL == HLNumber)) {
+            line->hl[i] = HLNumber;
+            ++i;
+            prevStep = 0;
+            continue;
+        }
+
+        prevStep = isSeperator(c);
+        ++i;
+    }
+}
+
+int syntaxToColor(int hl) {
+    switch (hl) {
+        case HLNumber: return 31;
+        case HLMatch: return 34;
+        default: return 37;
+    }
+}
+
 void eUpdateLine(eline *line) {
     int tabs = 0;
     for (int i = 0; i < line->size; ++i) {
@@ -121,6 +203,8 @@ void eUpdateLine(eline *line) {
 
     line->rdata[idx] = '\0';
     line->rsize = idx;
+
+    eUpdateSyntax(line);
 }
 
 void eInsertLine(int idx, char *line, size_t len) {
@@ -138,6 +222,7 @@ void eInsertLine(int idx, char *line, size_t len) {
 
     editorInfo.line[idx].rsize = 0;
     editorInfo.line[idx].rdata = NULL;
+    editorInfo.line[idx].hl = NULL;
     eUpdateLine(&editorInfo.line[idx]);
 
     ++editorInfo.linecount;
@@ -163,6 +248,7 @@ void eInsertNewLine() {
 void eFreeLine(eline *line) {
     free(line->rdata);
     free(line->data);
+    free(line->hl);
 }
 
 void eDeleteLine(int idx) {
@@ -304,7 +390,7 @@ void eSetError(const char *fmt, ...) {
     editorInfo.statuserror = true;
 }
 
-char *ePrompt(const char *prompt) {
+char *ePrompt(const char *prompt, void (*callback)(char *, int)) {
     if (prompt == NULL) {
         return NULL;
     }
@@ -325,13 +411,19 @@ char *ePrompt(const char *prompt) {
                 buf[--buflen] = '\0';
             }
         } else if (k == vk_escape) {
-            eSetStatus(NULL);
+            eSetStatus("");
+            if (callback) {
+                callback(buf, k);
+            }
             free(buf);
 
             return NULL;
         } else if (k == vk_enter) {
             if (buflen != 0) {
-                eSetStatus(NULL);
+                eSetStatus("");
+                if (callback) {
+                    callback(buf, k);
+                }
                 return buf;
             }
         } else if (!iscntrl(k) && k < 128) {
@@ -342,6 +434,10 @@ char *ePrompt(const char *prompt) {
 
             buf[buflen++] = (char)k;
             buf[buflen] = '\0';
+        }
+
+        if (callback) {
+            callback(buf, k);
         }
     }
 }
@@ -484,7 +580,7 @@ int cursorPosition(int *x, int *y) {
 }
 
 int windowSize(int *w, int *h) {
-    winsize ws{};
+    struct winsize ws;
 
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
         if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) {
@@ -548,7 +644,7 @@ void eOpen(char *filename) {
 
 void eSave() {
     if (editorInfo.filename == NULL) {
-        editorInfo.filename = ePrompt("Write as: %s");
+        editorInfo.filename = ePrompt("Write as: %s", NULL);
 
         if (editorInfo.filename == NULL) {
             eSetStatus("Write aborted");
@@ -576,6 +672,81 @@ void eSave() {
 
     free(buf);
     eSetStatus("Can't save! I/O error: %s", strerror(errno));
+}
+
+void eFindCallback(char *q, int key) {
+    static int lastMatch = -1;
+    static int direction = 1;
+
+    static int savedHLLine;
+    static char *savedHL = NULL;
+
+    if (savedHL) {
+        memcpy(editorInfo.line[savedHLLine].hl, savedHL, editorInfo.line[savedHLLine].rsize);
+        free(savedHL);
+        savedHL = NULL;
+    }
+
+    if (key == vk_enter || key == vk_escape) {
+        lastMatch = -1;
+        direction = 1;
+        return;
+    } else if (key == vk_right || key == vk_down) {
+        direction = 1;
+    } else if (key == vk_left || key == vk_up) {
+        direction = -1;
+    } else {
+        lastMatch = -1;
+        direction = 1;
+    }
+
+    if (lastMatch == -1) {
+        direction = 1;
+    }
+    int current = lastMatch;
+
+    for (int i = 0; i < editorInfo.linecount; ++i) {
+        current += direction;
+        if (current == -1) {
+            current = editorInfo.linecount - 1;
+        } else if (current == editorInfo.linecount) {
+            current = 0;
+        }
+
+        eline *line = &editorInfo.line[current];
+        char *match = strstr(line->rdata, q);
+
+        if (match) {
+            lastMatch = current;
+            editorInfo.cy = current;
+            editorInfo.cx = eRxToCx(line, (int)(match - line->rdata));
+            editorInfo.yoffset = editorInfo.linecount;
+
+            savedHLLine = current;
+            savedHL = (char*)malloc(line->rsize);
+            memcpy(savedHL, line->hl, line->rsize);
+            memset(&line->hl[match - line->rdata], HLMatch, strlen(q));
+            break;
+        }
+    }
+}
+
+void eFind() {
+    int savedCx = editorInfo.cx;
+    int savedCy = editorInfo.cy;
+    int savedXOffset = editorInfo.xoffset;
+    int savedYOffset = editorInfo.yoffset;
+
+    char *q = ePrompt("Search: %s", eFindCallback);
+
+    if (q != NULL) {
+        free(q);
+    } else {
+        editorInfo.cx = savedCx;
+        editorInfo.cy = savedCy;
+        editorInfo.xoffset = savedXOffset;
+        editorInfo.yoffset = savedYOffset;
+    }
 }
 
 void eScroll() {
@@ -634,14 +805,33 @@ void eDrawLines(abuf *ab) {
                 len = editorInfo.w;
             }
 
-            abAppend(ab, &editorInfo.line[fileline].rdata[editorInfo.xoffset], len);
+            char *c = &editorInfo.line[fileline].rdata[editorInfo.xoffset];
+            unsigned char *hl = &editorInfo.line[fileline].hl[editorInfo.xoffset];
+            int currentColor = -1;
+            for (int i = 0; i < len; ++i) {
+                if (hl[i] == HLNormal) {
+                    if (currentColor != -1) {
+                        abAppend(ab, "\x1b[39m", 5);
+                        currentColor = -1;
+                    }
+                    abAppend(ab, &c[i], 1);
+                } else {
+                    int color = syntaxToColor(hl[i]);
+                    if (color != currentColor) {
+                        currentColor = color;
+                        char buf[16];
+                        int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+                        abAppend(ab, buf, clen);
+                    }
+                    abAppend(ab, &c[i], 1);
+                }
+            }
+
+            abAppend(ab, "\x1b[39m", 5);
         }
 
         abAppend(ab, "\x1b[K", 3);
-
-        //if (y < editorInfo.h - 1) {
-            abAppend(ab, "\r\n", 2);
-        //}
+        abAppend(ab, "\r\n", 2);
     }
 }
 
@@ -650,8 +840,8 @@ void eDrawStatusBar(abuf *ab) {
     abAppend(ab, "\x1b[38;5;245m", 11); //set foreground color x1b[38;5;[]m replace [] with the color
 
     char status[80], rstatus[80];
-    int len = snprintf(status, sizeof(status), "%.20s%s",
-                       editorInfo.filename ? editorInfo.filename : "empty", editorInfo.dirty ? "[+]" : "");
+    int len = snprintf(status, sizeof(status), " %s %.20s%s", editorInfo.mode ? "EDIT" : "CMND",
+                       editorInfo.filename ? editorInfo.filename : "[empty]", editorInfo.dirty ? "[+]" : "");
     int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d:%d", editorInfo.cy + 1, editorInfo.linecount, editorInfo.cx);
 
     if (len > editorInfo.w) {
@@ -675,7 +865,7 @@ void eDrawStatusBar(abuf *ab) {
 
 void eDrawMsgBar(abuf *ab) {
     abAppend(ab, "\x1b[K", 3);
-    int msglen = strlen(editorInfo.statusmsg);
+    int msglen = (int)strlen(editorInfo.statusmsg);
 
     if (msglen > editorInfo.w) {
         msglen = editorInfo.w;
@@ -708,7 +898,7 @@ void ecls() {
 
     char buf[32];
     snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (editorInfo.cy - editorInfo.yoffset) + 1, (editorInfo.rx - editorInfo.xoffset) + 1);
-    abAppend(&ab, buf, strlen(buf));
+    abAppend(&ab, buf, (int)strlen(buf));
     abAppend(&ab, "\x1b[?25h", 6);
     abAppend(&ab, "\x1b]1337;CursorShape=1\x07", 21); //set cursor to vertical bar, iTerm2 specific
 
@@ -722,6 +912,7 @@ void eTick() {
     int k = eReadKey();
 
     switch (k) {
+        case vk_escape: editorInfo.mode = !editorInfo.mode; break;
         case vk_enter: eInsertNewLine(); break;
 
         case CTRL_KEY('q'):{
@@ -734,6 +925,7 @@ void eTick() {
         } break;
         case CTRL_KEY('B'): quit(); break;
         case CTRL_KEY('s'): eSave(); break;
+        case CTRL_KEY('f'): eFind(); break;
 
         case vk_home: editorInfo.cx = 0; break;
         case vk_end: {
@@ -792,6 +984,8 @@ void eInit() {
     editorInfo.statusmsg[0] = '\0';
     editorInfo.statusmsgTime = 0;
     editorInfo.statuserror = false;
+    editorInfo.syntax = NULL;
+    editorInfo.mode = EDT;
 
     if (windowSize(&editorInfo.w, &editorInfo.h) == -1) {
         die("windowSize");
@@ -808,7 +1002,11 @@ int main(int argc, char **argv) {
         eOpen(argv[1]);
     }
 
-    eSetStatus("HELP: Ctrl-S = save | Ctrl-Q = quit");
+    if (editorInfo.filename == NULL) {
+        editorInfo.mode = CMD;
+    }
+
+    eSetStatus(welcomeMsg);
 
     while (true) {
         ecls();
