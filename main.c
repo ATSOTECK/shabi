@@ -319,7 +319,7 @@ void eUpdateSyntax(eline *line) {
                 isNumber = true;
             }
 
-            if ((ishexnumber(c) && (prevHL == HLNumber)) || ((c == 'x' || c == 'X') && prevHL == HLNumber)) {
+            if ((isxdigit(c) && (prevHL == HLNumber)) || ((c == 'x' || c == 'X') && prevHL == HLNumber)) {
                 isNumber = true;
             }
 
