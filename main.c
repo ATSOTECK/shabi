@@ -590,10 +590,10 @@ void eDeleteChar() {
 }
 
 void cls() {
+    write(STDOUT_FILENO, "\x1b]1337;CursorShape=0\x07", 21); //set cursor to a block, iTerm2 specific
+    write(STDOUT_FILENO, "\x1b[m", 3);
     write(STDOUT_FILENO, "\x1b[2J", 4); //cls
     write(STDOUT_FILENO, "\x1b[H", 3); //move cursor
-    write(STDOUT_FILENO, "\x1b[m", 3);
-    write(STDOUT_FILENO, "\x1b]1337;CursorShape=0\x07", 21); //set cursor to a block, iTerm2 specific
 }
 
 void die(const char *s) {
