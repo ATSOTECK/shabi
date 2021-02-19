@@ -18,8 +18,21 @@
 #define EDT true
 #define CMD false
 
-//TODO(Skyler):
-char welcomeMsg[] = "Welcome 傻屄 :)";
+#define WELCOME_MSG_CNT 11
+
+char *welcomeMsg[] = {
+        "Welcome 傻屄 :)",
+        "Welcome friend :)",
+        "Be kind!",
+        "Déjà vu!",
+        "Since 1993!",
+        "Try ed!",
+        "Probably legal!",
+        "As seen on TV!",
+        "I mount my soul at /dev/null",
+        ":(){ :|: & };:",
+        "Almost never crashes!"
+};
 
 /*
  * yeet boi
@@ -48,8 +61,9 @@ enum eHighlight {
     HLNormal,
     HLComment,
     HLMLComment,
-    HLKeyword1,
-    HLKeyword2,
+    HLKeywords,
+    HLType,
+    HLMacro,
     HLString,
     HLNumber,
     HLMatch
@@ -95,6 +109,9 @@ struct editorInfo {
     struct termios origTermios;
     editorSyntax *syntax;
     bool mode;
+    bool showLineNumbers;
+    int maxLineLen;
+    bool useTrueTab;
 };
 
 typedef struct abuf {
@@ -105,14 +122,18 @@ typedef struct abuf {
 #define ABUF_INIT {NULL, 0}
 
 struct editorInfo editorInfo;
+bool firstMessage = true;
 
 char *cHLExtensions[] = {".c", ".h", NULL};
 char *cHLKeywords[] = {
         "switch", "if", "while", "for", "break", "continue", "return", "else",
-        "struct", "union", "typedef", "static", "enum", "class", "case",
+        "struct", "union", "typedef", "static", "enum", "class", "case", "default",
+        "sizeof", "auto", "do", "volatile", "extern", "goto", "register", "NULL",
 
         "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
-        "void|", NULL
+        "void|",
+
+        "#define]", "#endif]", "#error]", "#if]", "#ifdef]", "#ifndef]", "#include]", "#undef]", NULL
 };
 
 editorSyntax HLDB[] = {
@@ -140,6 +161,17 @@ void abAppend(abuf *ab, const char *s, int len) {
 
 void abFree(abuf *ab) {
     free(ab->b);
+}
+
+int getNumDigits(int n) {
+    int numDigits = 0;
+
+    while (n != 0) {
+        n /= 10;
+        ++numDigits;
+    }
+
+    return numDigits;
 }
 
 int eCxToRx(eline *line, int cx) {
@@ -173,7 +205,7 @@ int eRxToCx(eline *line, int rx) {
 }
 
 bool isSeperator(int c) {
-    return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[];", c) != NULL;
+    return isspace(c) || c == '\0' || strchr(",.(){}+-/*=~%<>[];:", c) != NULL;
 }
 
 void eUpdateSyntax(eline *line) {
@@ -194,8 +226,9 @@ void eUpdateSyntax(eline *line) {
     int mcsLen = mcs ? (int)strlen(mcs) : 0;
     int mceLen = mce ? (int)strlen(mce) : 0;
 
-    int prevStep = 1;
-    int inString = 0;
+    bool prevSep = true;
+    int inString = false;
+    int inInclude = false;
     int inComment = (line->idx > 0 && editorInfo.line[line->idx - 1].hlOpenComment);
 
     int i = 0;
@@ -217,7 +250,7 @@ void eUpdateSyntax(eline *line) {
                     memset(&line->hl[i], HLMLComment, mceLen);
                     i += mceLen;
                     inComment = 0;
-                    prevStep = 1;
+                    prevSep = 1;
                     continue;
                 } else {
                     ++i;
@@ -241,11 +274,11 @@ void eUpdateSyntax(eline *line) {
                 }
 
                 if (c == inString) {
-                    inString = 0;
+                    inString = false;
                 }
 
                 ++i;
-                prevStep = 1;
+                prevSep = true;
                 continue;
             } else {
                 if (c == '"' || c == '\'') {
@@ -255,40 +288,80 @@ void eUpdateSyntax(eline *line) {
                     continue;
                 }
             }
+
+            if (strcmp(editorInfo.syntax->filetype, "c") == 0 || strcmp(editorInfo.syntax->filetype, "cpp") == 0) {
+                if (strstr(line->data, "<") && strstr(line->data, "#include")) {
+                    if (inInclude) {
+                        line->hl[i] = HLString;
+
+                        if (c == '>') {
+                            inInclude = false;
+                        }
+
+                        ++i;
+                        prevSep = true;
+                        continue;
+                    } else {
+                        if (c == '<') {
+                            inInclude = true;
+                            line->hl[i] = HLString;
+                            ++i;
+                            continue;
+                        }
+                    }
+                }
+            }
         }
 
         if (editorInfo.syntax->flags & HL_HIGHLIGHT_NUMBERS) {
-            if (isdigit(c) && ((prevStep || prevHL == HLNumber) || (c == '.' && prevHL == HLNumber))) {
+            bool isNumber = false;
+            if ((isdigit(c) && ((prevSep || prevHL == HLNumber)) || (c == '.' && prevHL == HLNumber))) {
+                isNumber = true;
+            }
+
+            if ((ishexnumber(c) && (prevHL == HLNumber)) || ((c == 'x' || c == 'X') && prevHL == HLNumber)) {
+                isNumber = true;
+            }
+
+            if (isNumber) {
                 line->hl[i] = HLNumber;
                 ++i;
-                prevStep = 0;
+                prevSep = false;
                 continue;
             }
         }
 
-        if (prevStep) {
+        if (prevSep) {
             int j;
             for (j = 0; keywords[j]; ++j) {
                 int klen = (int)strlen(keywords[j]);
-                int kw2 = keywords[j][klen - 1] == '|';
-                if (kw2) {
+                bool isType = keywords[j][klen - 1] == '|';
+                bool isMacro = keywords[j][klen - 1] == ']';
+                if (isType || isMacro) {
                     --klen;
                 }
 
                 if (!strncmp(&line->rdata[i], keywords[j], klen) && isSeperator(line->rdata[i + klen])) {
-                    memset(&line->hl[i], kw2 ? HLKeyword2 : HLKeyword1, klen);
+                    int hlKind = HLKeywords;
+                    if (isType) {
+                        hlKind = HLType;
+                    } else if (isMacro) {
+                        hlKind = HLMacro;
+                    }
+
+                    memset(&line->hl[i], hlKind, klen);
                     i += klen;
                     break;
                 }
             }
 
             if (keywords[j] != NULL) {
-                prevStep = 0;
+                prevSep = false;
                 continue;
             }
         }
 
-        prevStep = isSeperator(c);
+        prevSep = isSeperator(c);
         ++i;
     }
 
@@ -302,11 +375,12 @@ void eUpdateSyntax(eline *line) {
 int syntaxToColor(int hl) {
     switch (hl) {
         case HLComment:
-        case HLMLComment: return 36;
-        case HLKeyword1: return 33;
-        case HLKeyword2: return 32;
-        case HLString: return 35;
-        case HLNumber: return 31;
+        case HLMLComment: return 28;
+        case HLKeywords: return 124;
+        case HLType: return 166;
+        case HLMacro: return 29;
+        case HLString: return 34;
+        case HLNumber: return 90;
         case HLMatch: return 34;
         default: return 37;
     }
@@ -396,6 +470,8 @@ void eInsertLine(int idx, char *line, size_t len) {
 
     ++editorInfo.linecount;
     ++editorInfo.dirty;
+
+    editorInfo.maxLineLen = getNumDigits(editorInfo.linecount);
 }
 
 void eInsertNewLine() {
@@ -468,12 +544,32 @@ void eLineAppendString(eline *line, char *s, size_t len) {
 }
 
 void eInsertChar(int c) {
+    if (iscntrl(c)) {
+        return;
+    }
+
     if (editorInfo.cy == editorInfo.linecount) {
         eInsertLine(editorInfo.linecount, NULL, 0);
     }
 
     eLineInsertChar(&editorInfo.line[editorInfo.cy], editorInfo.cx, c);
     ++editorInfo.cx;
+}
+
+void eInsertTab() {
+    bool useTrueTab = editorInfo.useTrueTab;
+
+    if (strcmp(editorInfo.filename, "Makefile") == 0 || strcmp(editorInfo.filename, "makefile") == 0) {
+        useTrueTab = true;
+    }
+
+    if (useTrueTab) {
+        eInsertChar('\t');
+    } else {
+        for (int i = 0; i < TAB_SIZE; ++i) {
+            eInsertChar(' ');
+        }
+    }
 }
 
 void eDeleteChar() {
@@ -800,6 +896,18 @@ void eOpen(char *filename) {
 
     eSelectSyntaxHL();
 
+    //If the file doesn't exist then treat it as a new file.
+    if (access(filename, F_OK) != 0) {
+        firstMessage = false;
+
+        eInsertNewLine();
+        eMove(vk_up);
+
+        eSetStatus("New file '%s'", filename);
+        editorInfo.dirty = 0;
+        return;
+    }
+
     FILE *file = fopen(filename, "r");
     if (!file) {
         die("fopen");
@@ -954,28 +1062,65 @@ void eScroll() {
     }
 }
 
+void eSetDefaultTextColor(abuf *ab) {
+    abAppend(ab, "\x1b[48;5;233m", 11); //set background color x1b[48;5;[]m replace [] with the color
+    abAppend(ab, "\x1b[38;5;246m", 11); //set foreground color x1b[38;5;[]m replace [] with the color
+}
+
+void eAddLineNumber(abuf *ab, int line) {
+    abAppend(ab, "\x1b[48;5;232m", 11); //set background color x1b[48;5;[]m replace [] with the color
+    abAppend(ab, "\x1b[38;5;240m", 11); //set foreground color x1b[38;5;[]m replace [] with the color
+
+    char *num = calloc(editorInfo.maxLineLen, sizeof(char*));
+    int lineLen = sprintf(num, "%d", line + 1);
+    for (int i = 0; i < editorInfo.maxLineLen - lineLen; ++i) {
+        abAppend(ab, " ", 1);
+    }
+    abAppend(ab, num, lineLen);
+    abAppend(ab, " ", 1);
+
+    eSetDefaultTextColor(ab);
+
+    free(num);
+}
+
+void eAddWelcomeMessage(abuf *ab, const char *msg, ...) {
+    va_list args;
+    va_start(args, msg);
+    char welcome[80];
+    int len = vsnprintf(welcome, sizeof(welcome), msg, args);
+    va_end(args);
+
+    if (len > editorInfo.w) {
+        len = editorInfo.w;
+    }
+
+    int padding = (editorInfo.w - len) / 2;
+    if (padding) {
+        abAppend(ab, "~", 1);
+    }
+
+    while (padding--) {
+        abAppend(ab, " ", 1);
+    }
+
+    abAppend(ab, welcome, len);
+    abAppend(ab, "\r\n", 2);
+}
+
 void eDrawLines(abuf *ab) {
     for (int y = 0; y < editorInfo.h; ++y) {
+        eSetDefaultTextColor(ab);
+
         int fileline = y + editorInfo.yoffset;
         if (fileline >= editorInfo.linecount) {
-            if (editorInfo.linecount == 0 && y == editorInfo.h / 3) {
-                char welcome[80];
-                int wlen = snprintf(welcome, sizeof(welcome), "shabi version %s", SHIBA_VER);
+            if (editorInfo.linecount == 0 && y == editorInfo.h / 4) {
+                eAddWelcomeMessage(ab, "shabi version %s", SHIBA_VER);
+                eAddWelcomeMessage(ab, " ");
+                eAddWelcomeMessage(ab, "type :help for help");
+                //++y;
 
-                if (wlen > editorInfo.w) {
-                    wlen = editorInfo.w;
-                }
-
-                int padding = (editorInfo.w - wlen) / 2;
-                if (padding) {
-                    abAppend(ab, "~", 1);
-                }
-
-                while (padding--) {
-                    abAppend(ab, " ", 1);
-                }
-
-                abAppend(ab, welcome, wlen);
+                continue;
             } else {
                 abAppend(ab, "~", 1);
             }
@@ -987,6 +1132,10 @@ void eDrawLines(abuf *ab) {
                 len = editorInfo.w;
             }
 
+            if (editorInfo.showLineNumbers) {
+                eAddLineNumber(ab, fileline);
+            }
+
             char *c = &editorInfo.line[fileline].rdata[editorInfo.xoffset];
             unsigned char *hl = &editorInfo.line[fileline].hl[editorInfo.xoffset];
             int currentColor = -1;
@@ -995,15 +1144,15 @@ void eDrawLines(abuf *ab) {
                     char sym = (char)((c[i] <= 26) ? '@' + c[i] : '?');
                     abAppend(ab, "\x1b[7m", 4);
                     abAppend(ab, &sym, 1);
-                    abAppend(ab, "\x1b[m", 3);
+                    eSetDefaultTextColor(ab);
                     if (currentColor != -1) {
                         char buf[16];
-                        int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", currentColor);
+                        int clen = snprintf(buf, sizeof(buf), "\x1b[38;5;%dm", currentColor);
                         abAppend(ab, buf, clen);
                     }
                 } else if (hl[i] == HLNormal) {
                     if (currentColor != -1) {
-                        abAppend(ab, "\x1b[39m", 5);
+                        eSetDefaultTextColor(ab);
                         currentColor = -1;
                     }
                     abAppend(ab, &c[i], 1);
@@ -1012,14 +1161,14 @@ void eDrawLines(abuf *ab) {
                     if (color != currentColor) {
                         currentColor = color;
                         char buf[16];
-                        int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+                        int clen = snprintf(buf, sizeof(buf), "\x1b[38;5;%dm", color);
                         abAppend(ab, buf, clen);
                     }
                     abAppend(ab, &c[i], 1);
                 }
             }
 
-            abAppend(ab, "\x1b[39m", 5);
+            eSetDefaultTextColor(ab);
         }
 
         abAppend(ab, "\x1b[K", 3);
@@ -1052,7 +1201,7 @@ void eDrawStatusBar(abuf *ab) {
         }
     }
 
-    abAppend(ab, "\x1b[m", 3);
+    eSetDefaultTextColor(ab);
     abAppend(ab, "\r\n", 2);
 }
 
@@ -1068,11 +1217,20 @@ void eDrawMsgBar(abuf *ab) {
         if (editorInfo.statuserror) {
             abAppend(ab, "\x1b[48;5;131m", 11); //set background color x1b[48;5;[]m replace [] with the color
             abAppend(ab, "\x1b[38;5;232m", 11); //set foreground color x1b[38;5;[]m replace [] with the color
+        } if (firstMessage) {
+            int color = (rand() % 5) + 28;
+            char *colorStr = malloc(sizeof(char*) * 11);
+            int len = sprintf(colorStr, "\x1b[38;5;%dm", color); //set foreground color x1b[38;5;[]m replace [] with the color
+            abAppend(ab, colorStr, len);
         }
 
         abAppend(ab, editorInfo.statusmsg, msglen);
-        abAppend(ab, "\x1b[m", 3);
+        eSetDefaultTextColor(ab);
     } else {
+        if (firstMessage) {
+            firstMessage = false;
+        }
+
         editorInfo.statuserror = false;
     }
 }
@@ -1089,8 +1247,14 @@ void ecls() {
     eDrawStatusBar(&ab);
     eDrawMsgBar(&ab);
 
+    //Set the cursor position and include the line number area width.
+    int lineNumberWidth = 0;
+    if (editorInfo.linecount > 0) {
+        lineNumberWidth = editorInfo.showLineNumbers ? editorInfo.maxLineLen + 1 : 0;
+    }
+
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (editorInfo.cy - editorInfo.yoffset) + 1, (editorInfo.rx - editorInfo.xoffset) + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (editorInfo.cy - editorInfo.yoffset) + 1, ((editorInfo.rx + lineNumberWidth) - editorInfo.xoffset) + 1);
     abAppend(&ab, buf, (int)strlen(buf));
     abAppend(&ab, "\x1b[?25h", 6);
     abAppend(&ab, "\x1b]1337;CursorShape=1\x07", 21); //set cursor to vertical bar, iTerm2 specific
@@ -1107,7 +1271,7 @@ void eTick() {
     switch (k) {
         case vk_escape: editorInfo.mode = !editorInfo.mode; break;
         case vk_enter: eInsertNewLine(); break;
-        case vk_tab: for (int i = 0; i < TAB_SIZE; ++i) {eInsertChar(' ');} break;
+        case vk_tab: eInsertTab(); break;
 
         case CTRL_KEY('q'):{
             if (editorInfo.dirty && quitTimes > 0) {
@@ -1180,6 +1344,9 @@ void eInit() {
     editorInfo.statuserror = false;
     editorInfo.syntax = NULL;
     editorInfo.mode = EDT;
+    editorInfo.showLineNumbers = true;
+    editorInfo.maxLineLen = 1;
+    editorInfo.useTrueTab = false;
 
     if (windowSize(&editorInfo.w, &editorInfo.h) == -1) {
         die("windowSize");
@@ -1192,6 +1359,9 @@ int main(int argc, char **argv) {
     enableRawMode();
     eInit();
 
+    srand(time(NULL));
+    eSetStatus(welcomeMsg[rand() % WELCOME_MSG_CNT]);
+
     if (argc >= 2) {
         eOpen(argv[1]);
     }
@@ -1199,8 +1369,6 @@ int main(int argc, char **argv) {
     if (editorInfo.filename == NULL) {
         editorInfo.mode = CMD;
     }
-
-    eSetStatus(welcomeMsg);
 
     while (true) {
         ecls();

@@ -2,7 +2,7 @@ CFLAGS=-g
 LDLIBS=-lpthread
 CC=gcc
 
-all: shabi.x
+all: shabi
 
-shabi.x: main.c
+shabi: main.c
 	${CC} ${CFLAGS} -o $@ $< ${LDLIBS}
