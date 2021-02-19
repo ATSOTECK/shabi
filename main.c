@@ -1390,6 +1390,21 @@ void eTick() {
     quitTimes = QUIT_TIMES;
 }
 
+void resizeWindow() {
+    windowSize(&editorInfo.w, &editorInfo.h);
+
+    if (editorInfo.cx > editorInfo.w) {
+        editorInfo.cx = editorInfo.w - 1;
+    }
+
+    if (editorInfo.cy > editorInfo.h) {
+        editorInfo.cy = editorInfo.h - 1;
+    }
+
+    editorInfo.h -= 2;
+    ecls();
+}
+
 void eInit() {
     editorInfo.cx = 0;
     editorInfo.cy = 0;
@@ -1413,6 +1428,8 @@ void eInit() {
     if (windowSize(&editorInfo.w, &editorInfo.h) == -1) {
         die("windowSize");
     }
+
+    signal(SIGWINCH, resizeWindow);
 
     editorInfo.h -= 2;
 }
