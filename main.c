@@ -9,6 +9,7 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include <wchar.h>
 
 #define SHIBA_VER "0.0.1"
 #define CTRL_KEY(k) ((k) & 0x1f)
@@ -102,6 +103,7 @@ struct editorInfo {
     int linecount;
     int dirty;
     char *filename;
+    char *filenameTrunc;
     char statusmsg[80];
     time_t statusmsgTime;
     bool statuserror;
@@ -146,6 +148,10 @@ void ecls();
 int eReadKey();
 char *ePrompt(const char *prompt, void (*callback)(char *, int));
 void eSelectSyntaxHL();
+void eInsertChar();
+void eInsertTab();
+void eSetStatus(const char *fmt, ...);
+void eSetError(const char *fmt, ...);
 
 void abAppend(abuf *ab, const char *s, int len) {
     char *n = (char*)realloc(ab->b, ab->len + len);
@@ -206,6 +212,15 @@ int eRxToCx(eline *line, int rx) {
 
 bool isSeperator(int c) {
     return isspace(c) || c == '\0' || strchr(",.(){}+-/*=~%<>[];:", c) != NULL;
+}
+
+void eSetFilenameTrunc() {
+    editorInfo.filenameTrunc = strrchr(editorInfo.filename, '/');
+    if (editorInfo.filenameTrunc == NULL) {
+        editorInfo.filenameTrunc = editorInfo.filename;
+    } else {
+        ++editorInfo.filenameTrunc;
+    }
 }
 
 void eUpdateSyntax(eline *line) {
@@ -424,7 +439,7 @@ void eUpdateLine(eline *line) {
     }
 
     free(line->rdata);
-    line->rdata  = (char*)malloc(line->size + tabs * (TAB_SIZE - 1) + 1);
+    line->rdata  = (char*)malloc(line->size + tabs * (TAB_SIZE - 1) + 4);
 
     int idx = 0;
     for (int j = 0; j < line->size; ++j) {
@@ -433,6 +448,12 @@ void eUpdateLine(eline *line) {
             while (idx % TAB_SIZE != 0) {
                 line->rdata[idx++] = ' ';
             }
+
+            /* Adds ┊ but messes up cursor movement.
+            line->rdata[idx++] = '\xE2';
+            line->rdata[idx++] = '\x94';
+            line->rdata[idx++] = '\x8A';
+            */
         } else {
             line->rdata[idx++] = line->data[j];
         }
@@ -488,6 +509,35 @@ void eInsertNewLine() {
 
     ++editorInfo.cy;
     editorInfo.cx = 0;
+
+    int spaces = 0;
+    int tabs = 0;
+    char *str = editorInfo.line[editorInfo.cy - 1].data;
+    for (int i = 0; i < editorInfo.line[editorInfo.cy - 1].size; ++i) {
+        if (str[i] == ' ') {
+            ++spaces;
+        } else if (str[i] == '\t') {
+            ++tabs;
+        }
+    }
+
+    int oldcx = editorInfo.cx;
+    editorInfo.cx = 0;
+
+    int indent = 0;
+    if (spaces % TAB_SIZE == 0) {
+        indent += spaces / TAB_SIZE;
+    } else {
+        for (int i = 0; i < spaces; ++i) {
+            eInsertChar(' ');
+        }
+    }
+    indent += tabs;
+
+    for (int i = 0; i < indent; ++i) {
+        eInsertTab();
+    }
+    editorInfo.cx = oldcx + spaces + tabs;
 }
 
 void eFreeLine(eline *line) {
@@ -544,7 +594,7 @@ void eLineAppendString(eline *line, char *s, size_t len) {
 }
 
 void eInsertChar(int c) {
-    if (iscntrl(c)) {
+    if (c != '\t' && iscntrl(c)) {
         return;
     }
 
@@ -558,8 +608,9 @@ void eInsertChar(int c) {
 
 void eInsertTab() {
     bool useTrueTab = editorInfo.useTrueTab;
+    char *fnt = editorInfo.filenameTrunc;
 
-    if (strcmp(editorInfo.filename, "Makefile") == 0 || strcmp(editorInfo.filename, "makefile") == 0) {
+    if (fnt && (strcmp(fnt, "Makefile") == 0 || strcmp(fnt, "makefile") == 0)) {
         useTrueTab = true;
     }
 
@@ -893,6 +944,7 @@ char *eLinesToStr(int *buflen) {
 void eOpen(char *filename) {
     free(editorInfo.filename);
     editorInfo.filename = strdup(filename);
+    eSetFilenameTrunc();
 
     eSelectSyntaxHL();
 
@@ -939,6 +991,7 @@ void eSave() {
             return;
         }
 
+        eSetFilenameTrunc();
         eSelectSyntaxHL();
     }
 
@@ -1295,11 +1348,19 @@ void eTick() {
         case vk_backspace:
         case CTRL_KEY('h'):
         case vk_delete: {
-            if (k == vk_delete) {
-                eMove(vk_right);
+            int count = 1;
+            int cx = editorInfo.cx;
+            while (count < TAB_SIZE && cx > 0 && editorInfo.line[editorInfo.cy].data[cx-- - 1] == ' ') {
+                ++count;
             }
 
-            eDeleteChar();
+            for (int i = 0; i < count; ++i) {
+                if (k == vk_delete) {
+                    eMove(vk_right);
+                }
+
+                eDeleteChar();
+            }
         } break;
 
         case vk_pagedown:
@@ -1339,6 +1400,7 @@ void eInit() {
     editorInfo.line = NULL;
     editorInfo.dirty = 0;
     editorInfo.filename = NULL;
+    editorInfo.filenameTrunc = NULL;
     editorInfo.statusmsg[0] = '\0';
     editorInfo.statusmsgTime = 0;
     editorInfo.statuserror = false;
