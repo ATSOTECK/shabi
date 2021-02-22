@@ -97,6 +97,7 @@ typedef struct eline {
 struct editorInfo {
     int cx, cy;
     int rx;
+    int tx;
     int yoffset;
     int xoffset;
     int w;
@@ -401,7 +402,7 @@ int syntaxToColor(int hl) {
         case HLMacro: return 29;
         case HLString: return 34;
         case HLNumber: return 90;
-        case HLMatch: return 34;
+        case HLMatch: return 198;
         default: return 37;
     }
 }
@@ -786,6 +787,8 @@ void eMove(int k) {
                 --editorInfo.cy;
                 editorInfo.cx = editorInfo.line[editorInfo.cy].size;
             }
+            
+            editorInfo.tx = editorInfo.cx;
         } break;
 
         case vk_right: {
@@ -795,6 +798,8 @@ void eMove(int k) {
                 ++editorInfo.cy;
                 editorInfo.cx = 0;
             }
+            
+            editorInfo.tx = editorInfo.cx;
         } break;
 
         case vk_up: {
@@ -814,6 +819,11 @@ void eMove(int k) {
 
     line = (editorInfo.cy >= editorInfo.linecount) ? NULL : &editorInfo.line[editorInfo.cy];
     int linelen = line ? line->size : 0;
+    
+    if (editorInfo.tx > editorInfo.cx) {
+        editorInfo.cx = editorInfo.tx;
+    }
+    
     if (editorInfo.cx > linelen) {
         editorInfo.cx = linelen;
     }
@@ -1128,6 +1138,12 @@ void eSetDefaultTextColor(abuf *ab) {
     abAppend(ab, "\x1b[38;5;246m", 11); //set foreground color x1b[38;5;[]m replace [] with the color
 }
 
+void eSetMatchColor(abuf *ab) {
+    eSetStatus("match");
+    abAppend(ab, "\x1b[48;5;29m", 10); //set background color x1b[48;5;[]m replace [] with the color
+    abAppend(ab, "\x1b[38;5;235m", 11); //set foreground color x1b[38;5;[]m replace [] with the color
+}
+
 void eAddLineNumber(abuf *ab, int line) {
     abAppend(ab, "\x1b[48;5;232m", 11); //set background color x1b[48;5;[]m replace [] with the color
     abAppend(ab, "\x1b[38;5;240m", 11); //set foreground color x1b[38;5;[]m replace [] with the color
@@ -1222,8 +1238,12 @@ void eDrawLines(abuf *ab) {
                     if (color != currentColor) {
                         currentColor = color;
                         char buf[16];
-                        int clen = snprintf(buf, sizeof(buf), "\x1b[38;5;%dm", color);
-                        abAppend(ab, buf, clen);
+                        if (color == HLMatch) {
+                            eSetMatchColor(ab);
+                        } else {
+                            int clen = snprintf(buf, sizeof(buf), "\x1b[38;5;%dm", color);
+                            abAppend(ab, buf, clen);
+                        }
                     }
                     abAppend(ab, &c[i], 1);
                 }
@@ -1362,6 +1382,8 @@ void eCMD() {
     } else if (strcmp(cmd, "wq") == 0) {
         eSave();
         quit();
+    } else if (strcmp(cmd, "help") == 0) {
+        eSetStatus("TODO: Add useful help.");
     } else {
         eSetError("Unknown command '%s'", cmd);
     }
@@ -1475,6 +1497,7 @@ void eInit() {
     editorInfo.cx = 0;
     editorInfo.cy = 0;
     editorInfo.rx = 0;
+    editorInfo.tx = 0;
     editorInfo.yoffset = 0;
     editorInfo.xoffset = 0;
     editorInfo.linecount = 0;

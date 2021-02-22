@@ -8,4 +8,4 @@ shabi: main.c
 	${CC} ${CFLAGS} -o $@ $< ${LDLIBS}
 	
 run: shabi
-	./shabi
+	./shabi main.c
