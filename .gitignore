@@ -30,7 +30,9 @@
 *.exe
 *.out
 *.app
+*.dSYM
 
 .idea/
 cmake-build-debug/
 CMakeCache.txt
+shabi

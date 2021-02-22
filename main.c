@@ -214,6 +214,10 @@ bool isSeperator(int c) {
     return isspace(c) || c == '\0' || strchr(",.(){}+-/*=~%<>[];:", c) != NULL;
 }
 
+int eWidth() {
+    return editorInfo.w - (editorInfo.showLineNumbers ? editorInfo.maxLineLen + 1 : 0);
+}
+
 void eSetFilenameTrunc() {
     editorInfo.filenameTrunc = strrchr(editorInfo.filename, '/');
     if (editorInfo.filenameTrunc == NULL) {
@@ -719,6 +723,9 @@ char *ePrompt(const char *prompt, void (*callback)(char *, int)) {
     if (prompt == NULL) {
         return NULL;
     }
+    
+    editorInfo.statuserror = false;
+    firstMessage = false;
 
     size_t bufsize = 128;
     char *buf = (char*)malloc(bufsize);
@@ -1110,8 +1117,8 @@ void eScroll() {
         editorInfo.xoffset = editorInfo.rx;
     }
 
-    if (editorInfo.rx >= editorInfo.xoffset + editorInfo.w) {
-        editorInfo.xoffset = editorInfo.rx - editorInfo.w + 1;
+    if (editorInfo.rx >= editorInfo.xoffset + eWidth()/*editorInfo.w*/) {
+        editorInfo.xoffset = editorInfo.rx - eWidth()/*editorInfo.w*/ + 1;
     }
 }
 
@@ -1144,8 +1151,8 @@ void eAddWelcomeMessage(abuf *ab, const char *msg, ...) {
     int len = vsnprintf(welcome, sizeof(welcome), msg, args);
     va_end(args);
 
-    if (len > editorInfo.w) {
-        len = editorInfo.w;
+    if (len > eWidth()) {
+        len = eWidth();
     }
 
     int padding = (editorInfo.w - len) / 2;
@@ -1181,8 +1188,8 @@ void eDrawLines(abuf *ab) {
             int len = editorInfo.line[fileline].rsize - editorInfo.xoffset;
             len = len < 0 ? 0 : len;
 
-            if (len > editorInfo.w) {
-                len = editorInfo.w;
+            if (len > eWidth()) {
+                len = eWidth();
             }
 
             if (editorInfo.showLineNumbers) {
@@ -1229,23 +1236,42 @@ void eDrawLines(abuf *ab) {
     }
 }
 
-void eDrawStatusBar(abuf *ab) {
+void eSetEDTColor(abuf *ab) {
     abAppend(ab, "\x1b[48;5;235m", 11); //set background color x1b[48;5;[]m replace [] with the color
     abAppend(ab, "\x1b[38;5;245m", 11); //set foreground color x1b[38;5;[]m replace [] with the color
+}
+
+void eSetCMDColor(abuf *ab) {
+    abAppend(ab, "\x1b[48;5;130m", 11); //set background color x1b[48;5;[]m replace [] with the color
+    abAppend(ab, "\x1b[38;5;232m", 11); //set foreground color x1b[38;5;[]m replace [] with the color
+}
+
+void eDrawStatusBar(abuf *ab) {
+    
+    if (editorInfo.mode == EDT) {
+        eSetEDTColor(ab);
+    } else {
+        eSetCMDColor(ab);
+    }
 
     char status[80], rstatus[80];
-    int len = snprintf(status, sizeof(status), " %s %.20s%s", editorInfo.mode ? "EDIT" : "CMND",
+    int len = snprintf(status, sizeof(status), " %s %.20s %s ", editorInfo.mode ? "EDIT" : "CMND",
                        editorInfo.filename ? editorInfo.filename : "[empty]", editorInfo.dirty ? "[+]" : "");
-    int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %d/%d:%d", editorInfo.syntax ? editorInfo.syntax->filetype : "",
+    int rlen = snprintf(rstatus, sizeof(rstatus), " %s | %d/%d:%d", editorInfo.syntax ? editorInfo.syntax->filetype : "",
                         editorInfo.cy + 1, editorInfo.linecount, editorInfo.cx);
 
     if (len > editorInfo.w) {
         len = editorInfo.w;
     }
     abAppend(ab, status, len);
+    
+    eSetEDTColor(ab);
 
     while (len < editorInfo.w) {
         if (editorInfo.w - len == rlen) {
+            if (editorInfo.mode == CMD) {
+                eSetCMDColor(ab);
+            }
             abAppend(ab, rstatus, rlen);
             break;
         } else {
@@ -1316,6 +1342,30 @@ void ecls() {
     abFree(&ab);
 }
 
+void eCMD() {
+    char *cmd = ePrompt(":%s", NULL);
+    if (cmd == NULL) {
+        return;
+    }
+    
+    if (strcmp(cmd, "q") == 0) {
+        if (editorInfo.dirty > 0) {
+            eSetError("No write since last change (:qq to override)");
+        } else {
+            quit();
+        }
+    } else if (strcmp(cmd, "q!") == 0 || strcmp(cmd, "qq") == 0) {
+        quit();
+    } else if (strcmp(cmd, "w") == 0) {
+        eSave();
+    } else if (strcmp(cmd, "wq") == 0) {
+        eSave();
+        quit();
+    } else {
+        eSetError("Unknown command '%s'", cmd);
+    }
+}
+
 void eTick() {
     static int quitTimes = QUIT_TIMES;
 
@@ -1323,8 +1373,8 @@ void eTick() {
 
     switch (k) {
         case vk_escape: editorInfo.mode = !editorInfo.mode; break;
-        case vk_enter: eInsertNewLine(); break;
-        case vk_tab: eInsertTab(); break;
+        case vk_enter: if (editorInfo.mode == EDT) {eInsertNewLine();} break;
+        case vk_tab: if (editorInfo.mode == EDT) {eInsertTab();} break;
 
         case CTRL_KEY('q'):{
             if (editorInfo.dirty && quitTimes > 0) {
@@ -1348,18 +1398,20 @@ void eTick() {
         case vk_backspace:
         case CTRL_KEY('h'):
         case vk_delete: {
-            int count = 1;
-            int cx = editorInfo.cx;
-            while (count < TAB_SIZE && cx > 0 && editorInfo.line[editorInfo.cy].data[cx-- - 1] == ' ') {
-                ++count;
-            }
-
-            for (int i = 0; i < count; ++i) {
-                if (k == vk_delete) {
-                    eMove(vk_right);
+            if (editorInfo.mode == EDT) {
+                int count = 1;
+                int cx = editorInfo.cx;
+                while (count < TAB_SIZE && cx > 0 && editorInfo.line[editorInfo.cy].data[cx-- - 1] == ' ') {
+                    ++count;
                 }
 
-                eDeleteChar();
+                for (int i = 0; i < count; ++i) {
+                    if (k == vk_delete) {
+                        eMove(vk_right);
+                    }
+
+                    eDeleteChar();
+                }
             }
         } break;
 
@@ -1384,7 +1436,20 @@ void eTick() {
         case vk_left:
         case vk_down:
         case vk_right: eMove(k); break;
-        default: eInsertChar(k); break;
+        
+        default: {
+            if (editorInfo.mode == EDT) {
+                eInsertChar(k);
+            } else {
+                switch (k) {
+                    case ':': eCMD(); break;
+                    case 'i': editorInfo.mode = EDT; break;
+                    case 'I': editorInfo.mode = EDT; editorInfo.cx = 0; break;
+                    case 'a': editorInfo.mode = EDT; eMove(vk_right); break;
+                    default: eSetError("Unknown command '%c'", (char)k); break;
+                }
+            }
+        } break;
     }
 
     quitTimes = QUIT_TIMES;
@@ -1393,8 +1458,8 @@ void eTick() {
 void resizeWindow() {
     windowSize(&editorInfo.w, &editorInfo.h);
 
-    if (editorInfo.cx > editorInfo.w) {
-        editorInfo.cx = editorInfo.w - 1;
+    if (editorInfo.cx > eWidth()) {
+        editorInfo.cx = eWidth();
     }
 
     if (editorInfo.cy > editorInfo.h) {
