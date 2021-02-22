@@ -436,6 +436,13 @@ void eSelectSyntaxHL() {
     }
 }
 
+void eMoveToEndOfLine(int idx) {
+    editorInfo.cy = idx;
+    eline *line = (editorInfo.cy >= editorInfo.linecount) ? NULL : &editorInfo.line[editorInfo.cy];
+    int linelen = line ? line->size : 0;
+    editorInfo.cx = linelen;
+}
+
 void eUpdateLine(eline *line) {
     int tabs = 0;
     for (int i = 0; i < line->size; ++i) {
@@ -1469,6 +1476,7 @@ void eTick() {
                     case 'i': editorInfo.mode = EDT; break;
                     case 'I': editorInfo.mode = EDT; editorInfo.cx = 0; break;
                     case 'a': editorInfo.mode = EDT; eMove(vk_right); break;
+                    case 'A': editorInfo.mode = EDT; eMoveToEndOfLine(editorInfo.cy); break;
                     default: eSetError("Unknown command '%c'", (char)k); break;
                 }
             }
