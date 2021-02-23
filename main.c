@@ -441,6 +441,13 @@ void eMoveToEndOfLine(int idx) {
     eline *line = (editorInfo.cy >= editorInfo.linecount) ? NULL : &editorInfo.line[editorInfo.cy];
     int linelen = line ? line->size : 0;
     editorInfo.cx = linelen;
+    editorInfo.tx = editorInfo.cx;
+}
+
+void eMoveToBeginningOfLine(int idx) {
+    editorInfo.cy = idx;
+    editorInfo.cx = 0;
+    editorInfo.tx = editorInfo.cx;
 }
 
 void eUpdateLine(eline *line) {
@@ -1474,7 +1481,7 @@ void eTick() {
                 switch (k) {
                     case ':': eCMD(); break;
                     case 'i': editorInfo.mode = EDT; break;
-                    case 'I': editorInfo.mode = EDT; editorInfo.cx = 0; break;
+                    case 'I': editorInfo.mode = EDT; eMoveToBeginningOfLine(editorInfo.cy); break;
                     case 'a': editorInfo.mode = EDT; eMove(vk_right); break;
                     case 'A': editorInfo.mode = EDT; eMoveToEndOfLine(editorInfo.cy); break;
                     default: eSetError("Unknown command '%c'", (char)k); break;
