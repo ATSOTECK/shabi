@@ -538,6 +538,8 @@ void eInsertNewLine() {
             ++spaces;
         } else if (str[i] == '\t') {
             ++tabs;
+        } else {
+            break;
         }
     }
 
