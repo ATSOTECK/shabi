@@ -1443,6 +1443,10 @@ void eTick() {
                 while (count < TAB_SIZE && cx > 0 && editorInfo.line[editorInfo.cy].data[cx-- - 1] == ' ') {
                     ++count;
                 }
+                
+                if (count < TAB_SIZE) {
+                    count = 1;
+                }
 
                 for (int i = 0; i < count; ++i) {
                     if (k == vk_delete) {
