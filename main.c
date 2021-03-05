@@ -660,6 +660,8 @@ void eDeleteChar() {
         eDeleteLine(editorInfo.cy);
         --editorInfo.cy;
     }
+    
+    editorInfo.tx = editorInfo.cx;
 }
 
 void cls() {
