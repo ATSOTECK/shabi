@@ -2,4 +2,4 @@
 
 ![screenshot](screenshot.png)
 
-This is a test project.
+Like vim, but worse! This is a test project.
