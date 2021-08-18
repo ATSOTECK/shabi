@@ -12,7 +12,7 @@
 #include <unistd.h>
 #include <wchar.h>
 
-#define SHIBA_VER "0.0.1"
+#define SHABI_VER "0.0.1"
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define TAB_SIZE 4
 #define QUIT_TIMES 2
@@ -1318,7 +1318,7 @@ void eDrawLines(abuf *ab) {
         int fileline = y + editorInfo.yoffset;
         if (fileline >= editorInfo.linecount) {
             if (editorInfo.linecount == 0 && y == editorInfo.h / 4) {
-                eAddWelcomeMessage(ab, "shabi version %s", SHIBA_VER);
+                eAddWelcomeMessage(ab, "shabi version %s", SHABI_VER);
                 eAddWelcomeMessage(ab, " ");
                 eAddWelcomeMessage(ab, "type :help for help");
                 //++y;
