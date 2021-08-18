@@ -20,7 +20,7 @@
 #define EDT true
 #define CMD false
 
-#define WELCOME_MSG_CNT 11
+#define WELCOME_MSG_CNT 12
 
 char *welcomeMsg[] = {
         "Welcome 傻屄 :)",
@@ -33,7 +33,8 @@ char *welcomeMsg[] = {
         "As seen on TV!",
         "I mount my soul at /dev/null",
         ":(){ :|: & };:",
-        "Almost never crashes!"
+        "Almost never crashes!",
+        "Like vim, but worse!"
 };
 
 /*
@@ -68,7 +69,8 @@ enum eHighlight {
     HLMacro,
     HLString,
     HLNumber,
-    HLMatch
+    HLMatch,
+    HLDollar
 };
 
 #define HL_HIGHLIGHT_NUMBERS (1 << 0)
@@ -123,6 +125,12 @@ typedef struct abuf {
     int len;
 } abuf;
 
+typedef struct ecmd {
+    char *cmd;
+    char **args;
+    int argc;
+} ecmd;
+
 #define ABUF_INIT {NULL, 0}
 
 struct editorInfo editorInfo;
@@ -133,15 +141,53 @@ char *cHLKeywords[] = {
         "switch", "if", "while", "for", "break", "continue", "return", "else",
         "struct", "union", "typedef", "static", "enum", "class", "case", "default",
         "sizeof", "auto", "do", "volatile", "extern", "goto", "register", "NULL",
+        "inline",
 
         "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
-        "void|",
+        "void|", "short|",
 
-        "#define]", "#endif]", "#error]", "#if]", "#ifdef]", "#ifndef]", "#include]", "#undef]", NULL
+        "#define]", "#endif]", "#error]", "#if]", "#ifdef]", "#ifndef]", "#include]", "#undef]", 
+        "#else]", "#elif]", "#pragma]", NULL
+};
+
+char *cppHLExtensions[] = {".cpp", ".h", ".hpp", ".cc", ".inl", NULL};
+char *cppHLKeywords[] = {
+        "switch", "if", "while", "for", "break", "continue", "return", "else",
+        "struct", "union", "typedef", "static", "enum", "class", "case", "default",
+        "sizeof", "auto", "do", "volatile", "extern", "goto", "register", "NULL",
+        "nullptr", "class", "public", "private", "protected", "template", "typename",
+        "true", "false", "friend", "this", "try", "catch", "trhow", "using", "namepsace"
+        "explicit", "virtual", "new", "delete", "mutable", "operator", "static_cast",
+        "dynamic_cast", "reinterpret_cast", "const_cast", "alignof", "inline"
+        "noexcept", 
+
+        "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
+        "void|", "nullptr_t|", "size_t|", "bool|", "short|",
+
+        "#define]", "#endif]", "#error]", "#if]", "#ifdef]", "#ifndef]", "#include]", "#undef]", 
+        "#else]", "#elif]", "#pragma]", NULL
+};
+
+char *jsExtensions[] = {".js"};
+char *jsKeywords[] = {"abstract", "arguments", "await", "break",
+        "case", "catch", "class", "const", "continue", "debugger", "default",
+        "delete", "do", "else", "enum", "eval", "export", "extends", "false",
+        "final", "finally", "for", "function", "goto", "if", "implements", "import",
+        "in", "instanceof", "interface", "let", "native", "new", "null",
+        "package", "private", "protected", "public", "return", "static", "super",
+        "switch", "synchronized", "throw", "throws", "transient", "true", "try",
+        "typeof", "var", "void", "volatile", "while", "with", "yield", "get", "set",
+        "constructor",
+        
+        "boolean|", "byte|", "char|", "double|", "float|", "int|", "long|", "short|", 
+        
+        "this]", NULL
 };
 
 editorSyntax HLDB[] = {
         {"c", cHLExtensions, cHLKeywords, "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS},
+        {"c++", cppHLExtensions, cppHLKeywords, "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS},
+        {"js", jsExtensions, jsKeywords, "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS}
 };
 
 #define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
@@ -154,6 +200,7 @@ void eInsertChar();
 void eInsertTab();
 void eSetStatus(const char *fmt, ...);
 void eSetError(const char *fmt, ...);
+void eReset();
 
 void abAppend(abuf *ab, const char *s, int len) {
     char *n = (char*)realloc(ab->b, ab->len + len);
@@ -180,6 +227,37 @@ int getNumDigits(int n) {
     }
 
     return numDigits;
+}
+
+void freeCMD(ecmd *cmd) {
+    if (cmd == NULL || cmd->argc == 0) {
+        return;
+    }
+    
+    free(cmd->cmd);
+    cmd->cmd = NULL;
+    
+    for (int i = 0; i < cmd->argc - 1; ++i) {
+        free(cmd->args[i]);
+        cmd->args[i] = NULL;
+    }
+    
+    cmd->args = NULL;
+    cmd->argc = 0;
+}
+
+ecmd parseCMD(char *cmdStr) {
+    ecmd cmd;
+    
+    cmd.cmd = NULL;
+    cmd.args = NULL;
+    cmd.argc = 0;
+    
+    if (cmdStr == NULL) {
+        return cmd;
+    }
+    
+    return cmd;
 }
 
 int eCxToRx(eline *line, int cx) {
@@ -232,9 +310,14 @@ void eSetFilenameTrunc() {
 void eUpdateSyntax(eline *line) {
     line->hl = (unsigned char*)realloc(line->hl, line->rsize);
     memset(line->hl, HLNormal, line->rsize);
+    bool inJs = false;
 
     if (editorInfo.syntax == NULL) {
         return;
+    }
+    
+    if (strcmp(editorInfo.syntax->filetype, "js") == 0) {
+        inJs = true;
     }
 
     char **keywords = editorInfo.syntax->keywords;
@@ -251,6 +334,7 @@ void eUpdateSyntax(eline *line) {
     int inString = false;
     int inInclude = false;
     int inComment = (line->idx > 0 && editorInfo.line[line->idx - 1].hlOpenComment);
+    bool inJsString = false;
 
     int i = 0;
     while (i < line->rsize) {
@@ -293,16 +377,32 @@ void eUpdateSyntax(eline *line) {
                     i += 2;
                     continue;
                 }
+                
+                if (inJsString && c == '$') {
+                    line->hl[i] = HLDollar;
+                }
+                
+                //TODO(Skyler): Make not stupid.
+                if (inJsString && c == '{' && line->rdata[i - 1] == '$') {
+                    while (i < line->rsize && c != '}') {
+                        line->hl[i] = HLNormal;
+                        ++i;
+                        c = line->rdata[i];
+                    }
+                    
+                }
 
                 if (c == inString) {
                     inString = false;
+                    inJsString = false;
                 }
 
                 ++i;
                 prevSep = true;
                 continue;
             } else {
-                if (c == '"' || c == '\'') {
+                inJsString = (inJs && c == '`');
+                if (c == '"' || c == '\'' || inJsString) {
                     inString = (int)c;
                     line->hl[i] = HLString;
                     ++i;
@@ -336,7 +436,7 @@ void eUpdateSyntax(eline *line) {
 
         if (editorInfo.syntax->flags & HL_HIGHLIGHT_NUMBERS) {
             bool isNumber = false;
-            if ((isdigit(c) && ((prevSep || prevHL == HLNumber)) || (c == '.' && prevHL == HLNumber))) {
+            if (((isdigit(c) && ((prevSep || prevHL == HLNumber))) || (c == '.' && prevHL == HLNumber))) {
                 isNumber = true;
             }
 
@@ -403,6 +503,7 @@ int syntaxToColor(int hl) {
         case HLString: return 34;
         case HLNumber: return 90;
         case HLMatch: return 198;
+        case HLDollar: return 208;
         default: return 37;
     }
 }
@@ -422,6 +523,11 @@ void eSelectSyntaxHL() {
             bool isExt = (s->filematch[idx][0] == '.');
 
             if ((isExt && ext && !strcmp(ext, s->filematch[idx])) || (!isExt && strstr(editorInfo.filename, s->filematch[idx]))) {
+                eSetStatus(ext);
+                if (strcmp(s->filetype, ".h") == 0) {
+                    //Check if a cpp file exists with the same name and if it does set that as the syntax.
+                }
+                
                 editorInfo.syntax = s;
 
                 for (int fileline = 0; fileline < editorInfo.linecount; ++fileline) {
@@ -978,6 +1084,8 @@ char *eLinesToStr(int *buflen) {
 }
 
 void eOpen(char *filename) {
+    eReset();
+    
     free(editorInfo.filename);
     editorInfo.filename = strdup(filename);
     eSetFilenameTrunc();
@@ -1387,6 +1495,9 @@ void eCMD() {
         return;
     }
     
+    //TODO(Skyler): Parse CMD.
+    //ecmd cmd = parseCMD(cmdStr);
+    
     if (strcmp(cmd, "q") == 0) {
         if (editorInfo.dirty > 0) {
             eSetError("No write since last change (:qq to override)");
@@ -1402,7 +1513,17 @@ void eCMD() {
         quit();
     } else if (strcmp(cmd, "help") == 0) {
         eSetStatus("TODO: Add useful help.");
-    } else {
+    } else if (strcmp(cmd, "reset") == 0) {
+        eReset();
+    } else if (cmd[0] == 'o' && cmd[1] == ' ') {
+        if (editorInfo.dirty > 0) {
+            eSetError("No write since last change (:oo to override)");
+        } else {
+            eOpen(&cmd[2]);
+        }
+    } else if (cmd[0] == 'o' && (cmd[1] == 'o' || cmd[1] == '!') && cmd[2] == ' ') {
+        eOpen(&cmd[3]);
+    }else {
         eSetError("Unknown command '%s'", cmd);
     }
 }
@@ -1544,6 +1665,20 @@ void eInit() {
     signal(SIGWINCH, resizeWindow);
 
     editorInfo.h -= 2;
+}
+
+void eReset() {
+    if (editorInfo.linecount > 0) {
+        for (int i = 0; i < editorInfo.linecount; ++i) {
+            free(editorInfo.line[i].data);
+            free(editorInfo.line[i].rdata);
+            free(editorInfo.line[i].hl);
+        }
+        
+        free((eline*)editorInfo.line);
+    }
+    
+    eInit();
 }
 
 int main(int argc, char **argv) {

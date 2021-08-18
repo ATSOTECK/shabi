@@ -1,4 +1,4 @@
-CFLAGS=-g
+CFLAGS=-g -Wall
 LDLIBS=-lpthread
 CC=gcc
 
